@@ -5,39 +5,155 @@ const GATEWAY_URL = "https://openrouter.ai/api/v1/chat/completions";
 // ✅ FIXED: Using OpenRouter's actual high-performance free models router to bypass credit balance locks
 const MODEL = "openrouter/free";
 
+export function optimizeTextForTokens(text: string): string {
+  if (!text) return "";
+  
+  // 1. Remove contact details (emails, phone numbers, website links, physical addresses)
+  let clean = text
+    .replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, "") // email
+    .replace(/\+?\d{1,4}[-.\s]?\(?\d{1,3}\)?[-.\s]?\d{1,4}[-.\s]?\d{1,4}[-.\s]?\d{1,9}/g, "") // phone
+    .replace(/https?:\/\/\S+/g, "") // URLs
+    .replace(/www\.\S+/g, "");
+
+  // 2. Remove common layout symbols, bullet points, and markdown dividers
+  clean = clean.replace(/[•▪♦*#\-_+=|\\/]/g, " ");
+
+  // 3. Remove excessive whitespace, newlines, and tabs
+  clean = clean.replace(/\s+/g, " ").trim();
+
+  // 4. Token-optimization: Remove common stop words (case-insensitive) to retain core nouns, verbs, and tech skills
+  const stopWords = new Set([
+    "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any", "are", "as", 
+    "at", "be", "because", "been", "before", "being", "below", "between", "both", "but", "by", 
+    "do", "does", "doing", "down", "during", "each", "few", "for", "from", "further", "had", 
+    "has", "have", "having", "he", "her", "here", "hers", "him", "his", "how", "i", "if", "in", 
+    "into", "is", "it", "its", "me", "more", "most", "my", "no", "nor", "not", "of", "off", "on", 
+    "once", "only", "or", "other", "our", "ours", "out", "over", "own", "same", "she", "should", 
+    "so", "some", "such", "than", "that", "the", "their", "theirs", "them", "then", "there", 
+    "these", "they", "this", "those", "through", "to", "too", "under", "until", "up", "very", 
+    "was", "we", "were", "what", "when", "where", "which", "while", "who", "whom", "why", "with", 
+    "you", "your", "yours"
+  ]);
+
+  const words = clean.split(" ");
+  const filteredWords = words.filter(word => {
+    const lowercase = word.toLowerCase().replace(/[^a-z0-9]/g, "");
+    return lowercase.length > 0 && !stopWords.has(lowercase);
+  });
+
+  // Re-assemble filtered words
+  let optimized = filteredWords.join(" ");
+
+  // 5. Hard limit to 1500 characters (extremely token-optimized, retaining high-signal content)
+  if (optimized.length > 1500) {
+    optimized = optimized.slice(0, 1500) + "...";
+  }
+
+  return optimized;
+}
+
+class SimpleRateLimiter {
+  private queue: (() => void)[] = [];
+  private activeCount = 0;
+  private lastRequestTime = 0;
+  private minIntervalMs = 4000; // Force 4 seconds spacing between any two API requests
+  private maxConcurrent = 1; // Sequential execution to prevent provider rate drops
+
+  async acquire(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      this.queue.push(resolve);
+      this.processQueue();
+    });
+  }
+
+  release() {
+    this.activeCount--;
+    this.processQueue();
+  }
+
+  private processQueue() {
+    if (this.queue.length === 0) return;
+    if (this.activeCount >= this.maxConcurrent) return;
+
+    const now = Date.now();
+    const elapsed = now - this.lastRequestTime;
+    const timeToWait = Math.max(0, this.minIntervalMs - elapsed);
+
+    if (timeToWait > 0) {
+      setTimeout(() => this.processQueue(), timeToWait);
+      return;
+    }
+
+    const next = this.queue.shift();
+    if (next) {
+      this.activeCount++;
+      this.lastRequestTime = Date.now();
+      next();
+    }
+  }
+}
+
+const apiRateLimiter = new SimpleRateLimiter();
+
 async function callGemini(system: string, user: string): Promise<string> {
-  // ✅ FIXED: Configured to look for the unified API key name from your local .env file
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error("MISSING_KEY");
 
-  const res = await fetch(GATEWAY_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${key}`,
-      // ✅ FIXED: Appended crucial metadata headers required by OpenRouter to greenlight free-tier streams
-      "HTTP-Referer": "http://localhost:3000",
-      "X-Title": "InterviewAI",
-    },
-    body: JSON.stringify({
-      model: MODEL,
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: user },
-      ],
-      response_format: { type: "json_object" },
-    }),
-  });
+  await apiRateLimiter.acquire();
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    if (res.status === 429) throw new Error("RATE_LIMITED");
-    if (res.status === 402) throw new Error("CREDITS_EXHAUSTED");
-    throw new Error(`AI_ERROR:${res.status}:${text.slice(0, 200)}`);
+  let attempt = 0;
+  const maxAttempts = 3;
+  let lastError: any = null;
+
+  try {
+    while (attempt < maxAttempts) {
+      try {
+        const res = await fetch(GATEWAY_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${key}`,
+            "HTTP-Referer": "http://localhost:3000",
+            "X-Title": "InterviewAI",
+          },
+          body: JSON.stringify({
+            model: MODEL,
+            messages: [
+              { role: "system", content: system },
+              { role: "user", content: user },
+            ],
+            response_format: { type: "json_object" },
+          }),
+        });
+
+        if (!res.ok) {
+          const text = await res.text().catch(() => "");
+          if (res.status === 429) {
+            console.warn(`Rate limited (429). Retrying in ${(attempt + 1) * 2000}ms...`);
+            await new Promise((r) => setTimeout(r, (attempt + 1) * 2000));
+            attempt++;
+            continue;
+          }
+          if (res.status === 402) throw new Error("CREDITS_EXHAUSTED");
+          throw new Error(`AI_ERROR:${res.status}:${text.slice(0, 200)}`);
+        }
+
+        const data = await res.json();
+        return data.choices?.[0]?.message?.content ?? "";
+      } catch (err: any) {
+        lastError = err;
+        if (err.message === "CREDITS_EXHAUSTED" || err.message.startsWith("AI_ERROR")) {
+          throw err;
+        }
+        console.warn(`Request failed: ${err.message}. Retrying in ${(attempt + 1) * 2000}ms...`);
+        await new Promise((r) => setTimeout(r, (attempt + 1) * 2000));
+        attempt++;
+      }
+    }
+    throw lastError || new Error("MAX_RETRIES_EXCEEDED");
+  } finally {
+    apiRateLimiter.release();
   }
-
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content ?? "";
 }
 
 function safeJsonParse<T>(raw: string, fallback: T): T {
@@ -68,12 +184,14 @@ Return STRICTLY valid JSON in this exact shape:
 { "questions": ["q1", "q2", "q3", "q4", "q5"] }
 No commentary. No markdown. JSON only.`;
 
+    const optimizedResume = data.resumeContext ? optimizeTextForTokens(data.resumeContext) : "";
+
     const user = `Interview Type: ${data.type}
 Difficulty: ${data.difficulty}
 ${
-  data.resumeContext && data.resumeContext.trim().length > 0
-    ? `Candidate Resume Context:
-${data.resumeContext.slice(0, 4000)}
+  optimizedResume
+    ? `Candidate Resume Context (Token-Optimized):
+${optimizedResume}
 
 CRITICAL: Since a resume is provided, you MUST tailor all 5 questions directly to the candidate's specific background, projects, work history, and skills listed in the resume. The questions should test them on their actual experience in the context of a ${data.difficulty} ${data.type} interview.`
     : `No resume provided — generate general questions for a ${data.difficulty}-level ${data.type} interview.`
