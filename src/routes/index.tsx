@@ -55,9 +55,10 @@ function InterviewSimulator() {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
-  const [resumeText, setResumeText] = useState("");
+  const [resumeUploadedText, setResumeUploadedText] = useState("");
   const [resumeName, setResumeName] = useState("");
   const [resumeFile, setResumeFile] = useState<File | null>(null);
+  const [pastedText, setPastedText] = useState("");
   const [questions, setQuestions] = useState<string[]>([]);
   const [current, setCurrent] = useState(0);
   const [textAnswer, setTextAnswer] = useState("");
@@ -198,24 +199,27 @@ function InterviewSimulator() {
     return fullText;
   }
 
+  async function extractFileText(file: File): Promise<string> {
+    let text = "";
+    if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
+      text = await extractTextFromPdf(file);
+    } else {
+      text = await file.text();
+    }
+    return text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, " ").slice(0, 8000);
+  }
+
   async function handleResumeFile(file: File) {
     setResumeName(file.name);
     setResumeFile(file);
     try {
-      let text = "";
-      if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
-        toast.info("Extracting PDF resume text...");
-        text = await extractTextFromPdf(file);
-      } else {
-        text = await file.text();
-      }
-      // simple clean: strip binary noise for text/plain; PDFs may give garbled text but we degrade gracefully
-      const cleaned = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, " ").slice(0, 8000);
-      setResumeText(cleaned);
-      toast.success(`Loaded ${file.name}`);
+      toast.info("Extracting PDF resume text...");
+      const cleaned = await extractFileText(file);
+      setResumeUploadedText(cleaned);
+      toast.success(`Loaded resume: ${file.name}`);
     } catch (err) {
       console.error(err);
-      toast.error("Couldn't read that file. Try a .txt or paste your resume text.");
+      toast.error("Couldn't read resume file. Try a .txt or paste your resume text.");
     }
   }
 
@@ -246,7 +250,7 @@ function InterviewSimulator() {
 
       if (resumeFile) {
         const fileExt = resumeFile.name.split(".").pop();
-        const fileName = `${Date.now()}_${Math.random().toString(36).substring(2, 15)}.${fileExt}`;
+        const fileName = `${Date.now()}_resume_${Math.random().toString(36).substring(2, 15)}.${fileExt}`;
         const filePath = `${fileName}`;
 
         const { data: uploadData, error: uploadError } = await supabase.storage
@@ -254,7 +258,7 @@ function InterviewSimulator() {
           .upload(filePath, resumeFile);
 
         if (uploadError) {
-          console.error("Storage upload error:", uploadError);
+          console.error("Storage resume upload error:", uploadError);
         } else if (uploadData) {
           const { data: { publicUrl } } = supabase.storage
             .from("resume_collection")
@@ -263,8 +267,27 @@ function InterviewSimulator() {
         }
       }
 
-      // Save pre-requisite registration info to Supabase
-      const formattedPhone = `+91${phoneDigits}`;
+      // Determine Resume vs. JD based on file upload vs. pasted text
+      const hasUploadedResume = !!resumeUploadedText.trim();
+      const hasPastedText = !!pastedText.trim();
+
+      let resumeContext = "";
+      let jdContext = "";
+
+      if (hasUploadedResume && hasPastedText) {
+        resumeContext = resumeUploadedText;
+        jdContext = pastedText;
+      } else if (hasUploadedResume) {
+        resumeContext = resumeUploadedText;
+      } else if (hasPastedText) {
+        resumeContext = pastedText;
+      }
+
+      let combinedResumeText = resumeContext.trim();
+      if (jdContext.trim()) {
+        combinedResumeText += `\n\n--- JOB DESCRIPTION ---\n${jdContext.trim()}`;
+      }
+
       const { error: dbError } = await supabase
         .from("pre_requisites")
         .insert([
@@ -274,7 +297,7 @@ function InterviewSimulator() {
             phone: formattedPhone,
             interview_type: type,
             difficulty: difficulty,
-            resume_text: resumeText.trim() || null,
+            resume_text: combinedResumeText || null,
             resume_url: uploadedResumeUrl,
           },
         ]);
@@ -283,7 +306,14 @@ function InterviewSimulator() {
         console.error("Failed to save user data to Supabase:", dbError);
       }
 
-      const res = await genFn({ data: { type, difficulty, resumeContext: resumeText } });
+      const res = await genFn({ 
+        data: { 
+          type, 
+          difficulty, 
+          resumeContext, 
+          jdContext 
+        } 
+      });
       if (!res.questions.length) throw new Error(res.error || "No questions");
       setQuestions(res.questions);
       setEvaluations(new Array(res.questions.length).fill(null));
@@ -355,6 +385,9 @@ function InterviewSimulator() {
     setResumeText("");
     setResumeName("");
     setResumeFile(null);
+    setJdText("");
+    setJdName("");
+    setJdFile(null);
     setInputMode("text");
     setCodeLanguage("javascript");
   }
@@ -411,8 +444,9 @@ function InterviewSimulator() {
             phone={phone}
             setPhone={setPhone}
             resumeName={resumeName}
-            resumeText={resumeText}
-            setResumeText={setResumeText}
+            resumeUploadedText={resumeUploadedText}
+            pastedText={pastedText}
+            setPastedText={setPastedText}
             onResume={handleResumeFile}
             onStart={startInterview}
             disabled={aiKeyOk === false}
@@ -723,8 +757,9 @@ function SetupView(props: {
   phone: string;
   setPhone: (v: string) => void;
   resumeName: string;
-  resumeText: string;
-  setResumeText: (v: string) => void;
+  resumeUploadedText: string;
+  pastedText: string;
+  setPastedText: (v: string) => void;
   onResume: (f: File) => void;
   onStart: () => void;
   disabled: boolean;
@@ -732,10 +767,10 @@ function SetupView(props: {
   const [showTextarea, setShowTextarea] = useState(false);
 
   useEffect(() => {
-    if (props.resumeText) {
+    if (props.resumeUploadedText || props.pastedText) {
       setShowTextarea(true);
     }
-  }, [props.resumeText]);
+  }, [props.resumeUploadedText, props.pastedText]);
 
   return (
     <div className="max-w-3xl mx-auto pt-6">
@@ -745,7 +780,7 @@ function SetupView(props: {
           Practice interviews with a <span className="text-gradient">live AI coach</span>.
         </h2>
         <p className="text-lg text-muted-foreground max-w-xl mx-auto">
-          Fill in your details below, upload your resume, and get 5 tailored questions with real-time scoring.
+          Fill in your details below, upload your resume, and get 5 tailored questions.
         </p>
       </div>
 
@@ -838,16 +873,20 @@ function SetupView(props: {
               {showTextarea ? (
                 <div className="relative h-full min-h-[120px]">
                   <Textarea
-                    value={props.resumeText}
-                    onChange={(e) => props.setResumeText(e.target.value)}
-                    placeholder="Paste your resume or job description text directly here to customize the interview questions..."
+                    value={props.pastedText}
+                    onChange={(e) => props.setPastedText(e.target.value)}
+                    placeholder={
+                      props.resumeUploadedText
+                        ? "Resume successfully uploaded! You can now paste the Job Description (JD) here to align questions..."
+                        : "Paste your resume or job description text directly here to customize the interview questions..."
+                    }
                     className="h-full min-h-[120px] resize-none font-sans text-xs bg-input"
                   />
-                  {props.resumeText && (
+                  {props.pastedText && (
                     <button
                       type="button"
                       onClick={() => {
-                        props.setResumeText("");
+                        props.setPastedText("");
                         setShowTextarea(false);
                       }}
                       className="absolute top-2 right-2 text-[10px] bg-destructive/25 hover:bg-destructive/40 text-destructive-foreground px-1.5 py-0.5 rounded border border-destructive/20"
@@ -862,7 +901,9 @@ function SetupView(props: {
                   className="flex flex-col items-center justify-center h-full min-h-[120px] p-4 rounded-lg border-2 border-dashed border-border hover:border-primary/50 cursor-pointer transition-colors text-center bg-muted/5"
                 >
                   <span className="text-xs text-muted-foreground font-medium">
-                    OR Paste your resume / Job Description Here Directly
+                    {props.resumeUploadedText
+                      ? "OR Paste Job Description (JD) Here directly"
+                      : "OR Paste your resume / Job Description Here Directly"}
                   </span>
                   <span className="text-[10px] text-muted-foreground/60 mt-1">
                     (Click to expand text box)
@@ -872,7 +913,9 @@ function SetupView(props: {
             </div>
           </div>
           <p className="text-[11px] text-muted-foreground">
-            Uploading a file will extract and display its text in the editor, which you can edit before starting.
+            {props.resumeUploadedText
+              ? "Resume uploaded successfully. Paste target JD to customize questions."
+              : "Uploading a file extracts its text (Resume). You can then paste the Job Description (JD) in the text box."}
           </p>
         </div>
 
