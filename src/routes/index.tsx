@@ -288,6 +288,8 @@ function InterviewSimulator() {
         combinedResumeText += `\n\n--- JOB DESCRIPTION ---\n${jdContext.trim()}`;
       }
 
+      const formattedPhone = `+91${phoneDigits}`;
+
       const { error: dbError } = await supabase
         .from("pre_requisites")
         .insert([
@@ -298,7 +300,6 @@ function InterviewSimulator() {
             interview_type: type,
             difficulty: difficulty,
             resume_text: combinedResumeText || null,
-            resume_url: uploadedResumeUrl,
           },
         ]);
 
@@ -382,12 +383,10 @@ function InterviewSimulator() {
     setName("");
     setEmail("");
     setPhone("");
-    setResumeText("");
+    setResumeUploadedText("");
     setResumeName("");
     setResumeFile(null);
-    setJdText("");
-    setJdName("");
-    setJdFile(null);
+    setPastedText("");
     setInputMode("text");
     setCodeLanguage("javascript");
   }

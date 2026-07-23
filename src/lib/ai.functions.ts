@@ -56,7 +56,7 @@ class SimpleRateLimiter {
   private queue: (() => void)[] = [];
   private activeCount = 0;
   private lastRequestTime = 0;
-  private minIntervalMs = 4000; // Force 4 seconds spacing between any two API requests
+  private minIntervalMs = 3000; // Balanced 3-second spacing to comfortably match OpenRouter's free tier (20 RPM)
   private maxConcurrent = 1; // Sequential execution to prevent provider rate drops
 
   async acquire(): Promise<void> {
@@ -101,56 +101,75 @@ async function callGemini(system: string, user: string): Promise<string> {
 
   await apiRateLimiter.acquire();
 
-  let attempt = 0;
-  const maxAttempts = 3;
+  // Balanced list of stable free models to query in sequence if there is a rate limit or token corruption
+  const models = [
+    "meta-llama/llama-3.1-8b-instruct:free",
+    "qwen/qwen-2.5-coder-32b-instruct:free",
+    "openrouter/free",
+  ];
+
   let lastError: any = null;
 
   try {
-    while (attempt < maxAttempts) {
-      try {
-        const res = await fetch(GATEWAY_URL, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${key}`,
-            "HTTP-Referer": "http://localhost:3000",
-            "X-Title": "InterviewAI",
-          },
-          body: JSON.stringify({
-            model: MODEL,
-            messages: [
-              { role: "system", content: system },
-              { role: "user", content: user },
-            ],
-            response_format: { type: "json_object" },
-          }),
-        });
+    for (const model of models) {
+      let attempt = 0;
+      const maxAttemptsPerModel = 2;
 
-        if (!res.ok) {
-          const text = await res.text().catch(() => "");
-          if (res.status === 429) {
-            console.warn(`Rate limited (429). Retrying in ${(attempt + 1) * 2000}ms...`);
-            await new Promise((r) => setTimeout(r, (attempt + 1) * 2000));
-            attempt++;
-            continue;
+      while (attempt < maxAttemptsPerModel) {
+        try {
+          console.log(`Calling AI with model: ${model} (attempt ${attempt + 1})`);
+          const res = await fetch(GATEWAY_URL, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${key}`,
+              "HTTP-Referer": "http://localhost:3000",
+              "X-Title": "InterviewAI",
+            },
+            body: JSON.stringify({
+              model: model,
+              messages: [
+                { role: "system", content: system },
+                { role: "user", content: user },
+              ],
+              response_format: { type: "json_object" },
+              temperature: 0.3, // Lower temperature to keep structure and avoid tokenizer degeneration
+            }),
+          });
+
+          if (!res.ok) {
+            const text = await res.text().catch(() => "");
+            if (res.status === 429) {
+              console.warn(`Rate limited (429) on model ${model}. Retrying/falling back...`);
+              await new Promise((r) => setTimeout(r, 1500));
+              attempt++;
+              continue;
+            }
+            if (res.status === 402) throw new Error("CREDITS_EXHAUSTED");
+            throw new Error(`AI_ERROR:${res.status}:${text.slice(0, 200)}`);
           }
-          if (res.status === 402) throw new Error("CREDITS_EXHAUSTED");
-          throw new Error(`AI_ERROR:${res.status}:${text.slice(0, 200)}`);
-        }
 
-        const data = await res.json();
-        return data.choices?.[0]?.message?.content ?? "";
-      } catch (err: any) {
-        lastError = err;
-        if (err.message === "CREDITS_EXHAUSTED" || err.message.startsWith("AI_ERROR")) {
-          throw err;
+          const data = await res.json();
+          const content = data.choices?.[0]?.message?.content ?? "";
+
+          // Tokenizer validation check: Reject responses containing Kannada (\u0C80-\u0CFF) or Devanagari (\u0900-\u097F) characters
+          if (/[\u0C80-\u0CFF\u0900-\u097F]/.test(content)) {
+            throw new Error("GIBBERISH_DETECTED: Response contains Kannada or Hindi characters.");
+          }
+
+          return content;
+        } catch (err: any) {
+          lastError = err;
+          console.warn(`Request failed for model ${model}: ${err.message}`);
+          if (err.message === "CREDITS_EXHAUSTED") {
+            throw err; // Propagate payment issues immediately
+          }
+          attempt++;
+          await new Promise((r) => setTimeout(r, 1000));
         }
-        console.warn(`Request failed: ${err.message}. Retrying in ${(attempt + 1) * 2000}ms...`);
-        await new Promise((r) => setTimeout(r, (attempt + 1) * 2000));
-        attempt++;
       }
     }
-    throw lastError || new Error("MAX_RETRIES_EXCEEDED");
+    throw lastError || new Error("ALL_MODELS_FAILED");
   } finally {
     apiRateLimiter.release();
   }
@@ -182,7 +201,8 @@ export const generateQuestions = createServerFn({ method: "POST" })
     const system = `You are an expert technical interviewer. Generate 5 targeted interview questions.
 Return STRICTLY valid JSON in this exact shape:
 { "questions": ["q1", "q2", "q3", "q4", "q5"] }
-No commentary. No markdown. JSON only.`;
+No commentary. No markdown. JSON only.
+CRITICAL: The questions must be written strictly in plain English. Do not include any foreign characters, scripts (like Hindi or Kannada), or emojis.`;
 
     const optimizedResume = data.resumeContext ? optimizeTextForTokens(data.resumeContext) : "";
 
@@ -235,7 +255,8 @@ export const evaluateAnswer = createServerFn({ method: "POST" })
     const system = `You are a strict but fair senior interviewer coach.
 Evaluate the candidate's answer and return STRICTLY valid JSON in this exact shape:
 { "score": <integer 1-10>, "feedback": "<2-4 sentences of actionable improvements>", "ideal_answer": "<a strong sample answer, 3-6 sentences>" }
-No commentary. No markdown. JSON only.`;
+No commentary. No markdown. JSON only.
+CRITICAL: All feedback and ideal answers must be written strictly in plain English. Do not include any foreign characters, scripts (like Hindi or Kannada), or emojis.`;
 
     const user = `Interview Type: ${data.type}
 Difficulty: ${data.difficulty}
