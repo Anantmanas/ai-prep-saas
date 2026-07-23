@@ -31,7 +31,10 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
-*.md
+
+!README.md
+*.pdf
+Anant_Resume_2026.pdf
 .env
 *.env
 *.env.local
