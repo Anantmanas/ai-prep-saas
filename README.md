@@ -30,21 +30,21 @@
 ## 📸 Application Showcase
 
 <div align="center">
-  <h3>1. Interactive Simulator Dashboard</h3>
+  <h3>1. Setup & Profile Customization</h3>
+  <img src="public/images/pic1.jpeg" alt="Setup Screen" width="100%" />
+  <p><em>Set interview parameters, difficulty levels, and upload files to generate customized questions.</em></p>
+
+  <br />
+
+  <h3>2. Interactive Simulator Dashboard</h3>
   <img src="public/images/pic2.png" alt="Interview AI Simulator Dashboard" width="100%" />
   <p><em>Practice coding or speaking answers with instant countdown timers and candidates details.</em></p>
 
   <br />
 
-  <h3>2. AI-Driven Performance Report</h3>
+  <h3>3. AI-Driven Performance Report</h3>
   <img src="public/images/pic3.png" alt="Evaluation Dashboard" width="100%" />
   <p><em>Examine detailed scoring feedback and ideal responses for each session question.</em></p>
-
-  <br />
-
-  <h3>3. Setup & Profile Customization</h3>
-  <img src="public/images/pic1.jpeg" alt="Setup Screen" width="100%" />
-  <p><em>Set interview parameters, difficulty levels, and upload files to generate customized questions.</em></p>
 </div>
 
 ---
